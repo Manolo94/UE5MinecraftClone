@@ -72,3 +72,9 @@ Plugins/*/Intermediate/*
 
 # Cache files for the editor to use
 DerivedDataCache/*
+
+# Fab marketplace assets (re-downloadable from Fab, keep out of history)
+Content/Fab/
+
+# Engine-provided ControlRig mannequin sample content (~392MB, re-obtainable, keep out of history)
+Content/Demo/

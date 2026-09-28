@@ -20,6 +20,23 @@ enum class BlockType : uint8
 	LEAVES UMETA(DisplayName = "LEAVES")
 };
 
+USTRUCT(BlueprintType)
+struct FChunkInfo
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chunk X origin")
+	int32 ChunkX;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chunk Y origin")
+	int32 ChunkY;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chunk Size in blocks")
+	int32 ChunkSizeInBlocks;
+};
+
+using TPopulateBlockFunc = TFunction <BlockType(int32 i, int32 j, int32 k, FChunkInfo chunkInfo)>;
+
 class MeshData
 {
 public:
@@ -128,8 +145,7 @@ public:
 	void BeginDestroy();
 
 	static TArray<BlockType> GenerateChunkData(int chunkI, int chunkJ, int sectionSideWidth, int numberOfSections,
-		int& sideWidth, int& sectionCount,
-		TFunction <BlockType(int32 i, int32 j, int32 k)> PopulateBlock);
+		int& sideWidth, int& sectionCount, TPopulateBlockFunc PopulateBlock);
 
 	UFUNCTION(BlueprintCallable, Category = "VoxelChunk")
 	void CreateVoxelChunk(TArray<BlockType> blocks, int sectionSide, int sectionCount);
@@ -139,7 +155,7 @@ public:
 	void RemoveVoxel(FVector insidePoint);
 
 	static void PlayerMovedToAnotherChunk(int newChunkX, int newChunkY, TQueue<TArray<MeshData*>>& chunkLoaderQueue,
-		TFunction <BlockType(int32 i, int32 j, int32 k)> PopulateBlock,
+		TPopulateBlockFunc PopulateBlock,
 		int32 ChunkRenderDistance);
 
 	static TMap<int32, AChunk*> ChunkMap;
@@ -151,11 +167,12 @@ public:
 		int32 sectionID, int32 sectionCount, TArray<BlockType> blocks, int32 sectionSide);
 	static TArray<MeshData*> GetMeshDataForChunk(int32 chunkI, int32 chunkJ, 
 		int32 sectionCount, TArray<BlockType> blocks, int32 sectionSide);
-	static TArray<MeshData*> GetMeshDataForChunk(int32 ChunkX, int32 ChunkY,
-		TFunction <BlockType(int32 i, int32 j, int32 k)> PopulateBlock);
+	static TArray<MeshData*> GetMeshDataForChunk(int32 ChunkX, int32 ChunkY, TPopulateBlockFunc PopulateBlock);
 
-	void static CreateChunk(int32 ChunkX, int32 ChunkY, UWorld* World);
-	void static CreateChunk(int32 ChunkX, int32 ChunkY, UWorld* World, TArray<MeshData*> chunkData);
+	static void ClearAllQueuedChunkTasks();
+
+	static void CreateChunk(int32 ChunkX, int32 ChunkY, UWorld* World);
+	static void CreateChunk(int32 ChunkX, int32 ChunkY, UWorld* World, TArray<MeshData*> chunkData);
 
 protected:
 	// Called when the game starts or when spawned
@@ -178,9 +195,17 @@ private:
 	UPROPERTY(VisibleAnywhere)
 	TArray<BlockType> mBlocks;
 
+	UPROPERTY(VisibleAnywhere)
+	int mChunkX;
+
+	UPROPERTY(VisibleAnywhere)
+	int mChunkY;
+
 	void PostActorCreated();
 
 	void PostLoad();
+
+	void UpdateVoxel(int32 i, int32 j, int32 k, BlockType blockType);
 
 	static bool CheckIfNeighboorIsAir(MeshData::Direction direction,
 		TArray<BlockType>& blocks, int i, int j, int k, 

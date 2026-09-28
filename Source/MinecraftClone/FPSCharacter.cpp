@@ -4,6 +4,8 @@
 #include "FPSCharacter.h"
 #include "Engine/World.h"
 #include "DamageableActor.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "Chunk.h"
 
 // Sets default values
@@ -12,6 +14,24 @@ AFPSCharacter::AFPSCharacter()
  	// Set this character to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
 	PrimaryActorTick.bCanEverTick = true;
 
+	// 3rd person camera boom
+	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
+	CameraBoom->SetupAttachment(RootComponent);
+	CameraBoom->TargetArmLength = 400.0f;
+	CameraBoom->bUsePawnControlRotation = true; // rotate arm based on controller
+
+	// 3rd person camera
+	FollowCamera = CreateDefaultSubobject<UCameraComponent>(TEXT("FollowCamera"));
+	FollowCamera->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
+	FollowCamera->bUsePawnControlRotation = false; // camera follows the arm, not directly
+
+	// 3rd person feel
+	bUseControllerRotationYaw = false;
+	bUseControllerRotationPitch = false;
+	bUseControllerRotationRoll = false;
+
+	GetCharacterMovement()->bOrientRotationToMovement = true;
+	GetCharacterMovement()->RotationRate = FRotator(0.0f, 540.0f, 0.0f); // turn speed
 }
 
 // Called when the game starts or when spawned
@@ -22,13 +42,22 @@ void AFPSCharacter::BeginPlay()
 	AChunk::ChunkMap.Empty();
 
 	if (!PopulateBlockFunction)
-		PopulateBlockFunction = [this](int32 i, int32 j, int32 k) {
-		return BlueprintPopulateBlock(i, j, k);
-	};
+	{
+		PopulateBlockFunction =
+			[WeakActor = MakeWeakObjectPtr(this)](int32 i, int32 j, int32 k, FChunkInfo chunkInfo) {
+			if (!WeakActor.IsValid()) return BlockType::AIR;
+			return WeakActor->BlueprintPopulateBlock(i, j, k, chunkInfo);
+			};
+	}
 
 	// TODO: Use a heap to give priority to the chunks closest to the player
 	TArray<MeshData*> d = AChunk::GetMeshDataForChunk(0, 0, PopulateBlockFunction);
 	chunkRenderQueue.Enqueue(d);
+}
+
+void AFPSCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	AChunk::ClearAllQueuedChunkTasks();
 }
 
 // Called every frame
@@ -65,7 +94,6 @@ void AFPSCharacter::Tick(float DeltaTime)
 void AFPSCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
 	Super::SetupPlayerInputComponent(PlayerInputComponent);
-
 }
 
 void AFPSCharacter::PrimaryFire()

@@ -4,6 +4,8 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
+#include "GameFramework/SpringArmComponent.h"
+#include "Camera/CameraComponent.h"
 #include "Chunk.h"
 #include "FPSCharacter.generated.h"
 
@@ -16,6 +18,12 @@ public:
 	// Sets default values for this character's properties
 	AFPSCharacter();
 
+	UPROPERTY(VisibleAnywhere, Category = "Camera")
+	USpringArmComponent* CameraBoom;
+
+	UPROPERTY(VisibleAnywhere, Category = "Camera")
+	UCameraComponent* FollowCamera;
+
 	UPROPERTY(EditAnywhere, Category = "Weapon")
 	float weaponRange{ 1000 };
 
@@ -23,9 +31,9 @@ public:
 	int32 CHUNK_RENDER_DISTANCE { 10 };
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "ChunkGeneration")
-	BlockType BlueprintPopulateBlock(int32 i, int32 j, int32 k);
+	BlockType BlueprintPopulateBlock(int32 i, int32 j, int32 k, FChunkInfo ChunkInfo);
 
-	TFunction<BlockType(int32 i, int32 j, int32 k)> PopulateBlockFunction = NULL;
+	TPopulateBlockFunc PopulateBlockFunction = NULL;
 
 	UFUNCTION(BlueprintCallable, Category = "Weapon")
 	void PrimaryFire();
@@ -36,11 +44,16 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapon")
 	void ChangeBlockInHand(BlockType newBlockType);
 
+	// TODO: This should be in its own subsystem
 	TQueue<TArray<MeshData*>> chunkRenderQueue;
 
 protected:
 	// Called when the game starts or when spawned
 	virtual void BeginPlay() override;
+
+	// Called when the game ends or when the object is destroyed
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
 	FHitResult InstantShot();
 
 public:	

@@ -57,21 +57,22 @@ void AChunk::PostLoad()
 // Each chunk it's a stack of sections, one on top of another
 // For a 16x16x256 chunk, the sectionSideWidth will be 16, and the number of Sections is 16, 16*16 = 256
 TArray<BlockType> AChunk::GenerateChunkData(int chunkI, int chunkJ, int sectionSideWidth, int numberOfSections,
-	int& sideWidth, int& sectionCount,
-	TFunction <BlockType(int32 i, int32 j, int32 k)> PopulateBlock)
+	int& sideWidth, int& sectionCount, TPopulateBlockFunc PopulateBlock)
 {
 	// Setup the chunk size
 	sideWidth = sectionSideWidth; sectionCount = numberOfSections;
 
 	// Setup the block array
+	// Add an extra row and an extra column to account for edges
 	TArray<BlockType> blocks;
-	blocks.SetNum(numberOfSections * sectionSideWidth * sectionSideWidth * sectionSideWidth);
+	int sideSize = sectionSideWidth + 1;
+	blocks.SetNum(numberOfSections * sideSize * sideSize * sideSize);
 
 	int I, J, K; 
-	for (int i = 0; i < numberOfSections * sectionSideWidth * sectionSideWidth * sectionSideWidth; i++)
+	for (int i = 0; i < blocks.Num(); i++)
 	{
 		GetIJKFromPositionInTArray(i, sectionSideWidth, I, J, K);
-		blocks[i] = PopulateBlock(I, J, K);
+		blocks[i] = PopulateBlock(I, J, K, FChunkInfo{ chunkI, chunkJ, sectionSideWidth });
 	}
 
 	return blocks;
@@ -141,9 +142,9 @@ MeshData* AChunk::GetMeshData(int32 chunkI, int32 chunkJ, int32 sectionID, int32
 
 	for (int i = initialI; i < lastI; i++)
 	{
-		for (int j = 0; j < sectionSide; j++)
+		for (int j = 0; j <= sectionSide; j++)
 		{
-			for (int k = 0; k < sectionSide; k++)
+			for (int k = 0; k <= sectionSide; k++)
 			{
 				if (blocks[GetPositionInTArray(i,j,k,sectionSide)] == BlockType::AIR) continue;
 				for (int d = 0; d < MeshData::Direction::SIZE; d++)
@@ -167,37 +168,29 @@ bool AChunk::CheckIfNeighboorIsAir(MeshData::Direction direction, TArray<BlockTy
 	FVector offset = data.NORMALS[direction];
 	int newI = i + offset.Z, newJ = j + offset.Y, newK = k + offset.X;
 
-	// TODO: Handle interchunk check
-	if (newI >= sectionCount * sectionSide || newI < 0) return false;
-	if (newJ >= sectionSide || newJ < 0) return false;
-	if (newK >= sectionSide || newK < 0) return false;
+	// Chunks have an extra column and row to handle interchunk rendering
+	//  so newI == sectionSide * sectionSide, newJ == sectionSide and newK == sectionSide are all valid
+	if (newI > sectionSide * sectionSide || newI < 0) return false;
+	if (newJ > sectionSide || newJ < 0) return false;
+	if (newK > sectionSide || newK < 0) return false;
 
-	//UE_LOG(LogTemp, Log, TEXT("%d %d %d -> %d %d %d: %d: %s"),
-	//	i, j, k, newI, newJ, newK,
-	//	direction,
-	//	(blocks[GetPositionInTArray(newI, newJ, newK)] == BlockType::AIR) ? TEXT("TRUE") : TEXT("FALSE"))
+	// Ignore checks between blocks at the edge (not owned by this chunk)
+	if (j == sectionSide && newJ == sectionSide) return false;
+	if (k == sectionSide && newK == sectionSide) return false;
 
 	return blocks[GetPositionInTArray(newI,newJ,newK, sectionSide)] == BlockType::AIR;
 }
 
-void AChunk::AddVoxel(FVector insidePoint, BlockType blockTypeToAdd)
+void AChunk::UpdateVoxel(int32 i, int32 j, int32 k, BlockType blockType)
 {
-	int k = int(insidePoint.X) / BlockSize;
-	int j = int(insidePoint.Y) / BlockSize;
-	int i = int(insidePoint.Z) / BlockSize;
-
 	int positionInTArray = GetPositionInTArray(i, j, k, mSectionSide);
 
-	// TODO: Handle interchunk check
-	if (i >= mSectionCount * mSectionSide || i < 0) return;
-	if (j >= mSectionSide || j < 0) return;
-	if (k >= mSectionSide || k < 0) return;
+	// Don't do anything if blocks are already set to what we want
+	if (mBlocks[positionInTArray] == blockType) return;
 
-	UE_LOG(LogTemp, Log, TEXT("Blocks Size %d %d %d"), mBlocks.Num(), &mBlocks, this);
+	UE_LOG(LogTemp, Log, TEXT("UpdateVoxel: Updating chunk %d %d"), mChunkX, mChunkY);
+	mBlocks[positionInTArray] = blockType;
 
-	mBlocks[positionInTArray] = blockTypeToAdd;
-
-	// TODO: Handle interchunk compute
 	// Reconstruct the current section
 	int32 section = i / mSectionSide;
 
@@ -219,6 +212,56 @@ void AChunk::AddVoxel(FVector insidePoint, BlockType blockTypeToAdd)
 	mesh->ClearMeshSection(section);
 	mesh->CreateMeshSection_LinearColor(section, d->vertices, d->Triangles, d->normals, d->UV0, d->vertexColors, d->tangents, true);
 	delete(d);
+
+	// Interchunk updates, make sure adjacent blocks are notified of the change
+	//  only do this for blocks we own (j >= 0 && j < sectionSide, k >= 0 && k < sectionSide)
+	//  Also, only going through the back and left chunks prevents recursive calls back and forth
+	// Back chunk boundary
+	if (j == 0)
+	{
+		auto nextChunk = ChunkMap.Find(GetHashFromChunkPosition(mChunkX, mChunkY - 1));
+		if (nextChunk) (*nextChunk)->UpdateVoxel(i, mSectionSide, k, blockType);
+	}
+	// Left chunk boundary
+	if (k == 0)
+	{
+		auto nextChunk = ChunkMap.Find(GetHashFromChunkPosition(mChunkX - 1, mChunkY));
+		if (nextChunk) (*nextChunk)->UpdateVoxel(i, j, mSectionSide, blockType);
+	}
+}
+
+void AChunk::AddVoxel(FVector insidePoint, BlockType blockTypeToAdd)
+{
+	int k = int(insidePoint.X) / BlockSize;
+	int j = int(insidePoint.Y) / BlockSize;
+	int i = int(insidePoint.Z) / BlockSize;
+
+	// Chunks have an extra column and row to handle interchunk rendering
+	//  so newI == sectionSide * sectionSide, newJ == sectionSide and newK == sectionSide are all valid
+	if (i > mSectionCount * mSectionSide || i < 0) return;
+	if (j > mSectionSide || j < 0) return;
+	if (k > mSectionSide || k < 0) return;
+
+	UE_LOG(LogTemp, Log, TEXT("AddVoxel: Updating chunk(s)"));
+
+	// Interchunk checks, check if the voxel we are adding doesn't belong to the current chunk
+	// Front chunk boundary
+	if (j == mSectionSide)
+	{
+		auto nextChunk = ChunkMap.Find(GetHashFromChunkPosition(mChunkX, mChunkY + 1));
+		if (nextChunk) (*nextChunk)->UpdateVoxel(i, 0, k, blockTypeToAdd);
+	}
+	// Right chunk boundary
+	else if (k == mSectionSide)
+	{
+		auto nextChunk = ChunkMap.Find(GetHashFromChunkPosition(mChunkX + 1, mChunkY));
+		if (nextChunk) (*nextChunk)->UpdateVoxel(i, j, 0, blockTypeToAdd);
+	}
+	// Current chunk
+	else
+	{
+		UpdateVoxel(i, j, k, blockTypeToAdd);
+	}
 }
 
 void AChunk::RemoveVoxel(FVector insidePoint)
@@ -227,41 +270,26 @@ void AChunk::RemoveVoxel(FVector insidePoint)
 	int j = int(insidePoint.Y) / BlockSize;
 	int i = int(insidePoint.Z) / BlockSize;
 
-	int positionInTArray = GetPositionInTArray(i, j, k, mSectionSide);
-	// TODO: Handle interchunk check
-	if (i >= mSectionCount*mSectionSide || i < 0) return;
-	if (j >= mSectionSide || j < 0) return;
-	if (k >= mSectionSide || k < 0) return;
+	UE_LOG(LogTemp, Log, TEXT("RemoveVoxel: Updating chunk(s)"));
 
-	//UE_LOG(LogTemp, Log, TEXT("Blocks Size %d %d %d"), mBlocks.Num(), &mBlocks, this);
-
-	mBlocks[positionInTArray] = BlockType::AIR;
-
-	// TODO: Handle interchunk compute
-	// Reconstruct the current section
-	int32 section = i / mSectionSide;
-
-	UE_LOG(LogTemp, Log, TEXT("Removing voxel %d %d %d, at section: %d"), i, j, k, section)
-
-	// Check if section above or below needs update (current i is right at the edge)
-	if (i % mSectionSide == 0 || (i + 1) % mSectionSide == 0)
+	// Interchunk checks, check if the voxel we are adding doesn't belong to the current chunk
+	// Front chunk boundary
+	if (j == mSectionSide)
 	{
-		int32 extraSection = i % mSectionSide == 0 ? section - 1 : section + 1;
-
-		MeshData* d = GetMeshData(0,0, extraSection, mSectionCount, mBlocks, mSectionSide);
-		mesh->ClearMeshSection(extraSection);
-		mesh->CreateMeshSection_LinearColor(extraSection, d->vertices, d->Triangles, d->normals, d->UV0, d->vertexColors, d->tangents, true);
-
-		delete(d);
-
-		UE_LOG(LogTemp, Log, TEXT("Extra section updated i: %d, extraSection: %d"), i, extraSection);
+		auto nextChunk = ChunkMap.Find(GetHashFromChunkPosition(mChunkX, mChunkY + 1));
+		if (nextChunk) (*nextChunk)->UpdateVoxel(i, 0, k, BlockType::AIR);
 	}
-
-	MeshData* d = GetMeshData(0,0,section, mSectionCount, mBlocks, mSectionSide);
-	mesh->ClearMeshSection(section);
-	mesh->CreateMeshSection_LinearColor(section, d->vertices, d->Triangles, d->normals, d->UV0, d->vertexColors, d->tangents, true);
-
-	delete(d);
+	// Right chunk boundary
+	else if (k == mSectionSide)
+	{
+		auto nextChunk = ChunkMap.Find(GetHashFromChunkPosition(mChunkX + 1, mChunkY));
+		if (nextChunk) (*nextChunk)->UpdateVoxel(i, j, 0, BlockType::AIR);
+	}
+	// Current chunk
+	else
+	{
+		UpdateVoxel(i, j, k, BlockType::AIR);
+	}
 }
 
 void AChunk::AddVoxelFace(MeshData::Direction direction,
@@ -342,15 +370,17 @@ void AChunk::AddVoxelFace(MeshData::Direction direction,
 // Given an i, j, k position, return the position in the resulting block array
 int AChunk::GetPositionInTArray(int i, int j, int k, int sectionSide)
 {
-	return i * sectionSide*sectionSide + j * sectionSide + k;
+	int sideSize = sectionSide + 1; // + 1 to account for edges
+	return i * sideSize * sideSize + j * sideSize + k;
 }
 
 // Given the position in the block array, return its corresponding i, j, k position
 void AChunk::GetIJKFromPositionInTArray(int pos, int sectionSide, int& i, int& j, int& k)
 {
-	i = pos / (sectionSide * sectionSide);
-	j = (pos % (sectionSide * sectionSide)) / sectionSide;
-	k = (pos % (sectionSide * sectionSide)) % sectionSide;
+	int sideSize = sectionSide + 1; // + 1 to account for edges
+	i = pos / (sideSize * sideSize);
+	j = (pos % (sideSize * sideSize)) / sideSize;
+	k = (pos % (sideSize * sideSize)) % sideSize;
 }
 
 void AChunk::CreateTriangle()
@@ -405,8 +435,7 @@ void AChunk::Tick(float DeltaTime)
 
 }
 
-TArray<MeshData*> AChunk::GetMeshDataForChunk(int32 ChunkX, int32 ChunkY, 
-	TFunction <BlockType(int32 i, int32 j, int32 k)> PopulateBlock)
+TArray<MeshData*> AChunk::GetMeshDataForChunk(int32 ChunkX, int32 ChunkY, TPopulateBlockFunc PopulateBlock)
 {
 	int dummy;
 	TArray<BlockType> blocks = AChunk::GenerateChunkData(ChunkX, ChunkY, 16, 16, dummy, dummy, PopulateBlock);
@@ -455,8 +484,11 @@ void AChunk::CreateChunk(int32 ChunkX, int32 ChunkY, UWorld* World, TArray<MeshD
 		{
 			AChunk* const newChunk = World->SpawnActor<AChunk>(AChunk::StaticClass(), transform);
 
+			newChunk->SetActorLabel(FString::Printf(TEXT("Chunk_%d_%d"), ChunkX, ChunkY));
 			newChunk->mBlocks = TArray<BlockType>(chunkData[0]->blocks);
 			newChunk->mSectionSide = chunkData[0]->sectionSide; newChunk->mSectionCount = chunkData[0]->sectionCount;
+			newChunk->mChunkX = ChunkX;
+			newChunk->mChunkY = ChunkY;
 
 			// Generate the mesh data by sections, each of sectionSide*sectionSide, start at the bottom
 			for (int32 section = 0; section < 16; section++)
@@ -482,8 +514,7 @@ void AChunk::CreateChunk(int32 ChunkX, int32 ChunkY, UWorld* World, TArray<MeshD
 }
 
 void AChunk::PlayerMovedToAnotherChunk(int newChunkX, int newChunkY, TQueue<TArray<MeshData*>> &chunkLoaderQueue, 
-	TFunction <BlockType(int32 i, int32 j, int32 k)> PopulateBlock,
-	int32 ChunkRenderDistance)
+	TPopulateBlockFunc PopulateBlock, int32 ChunkRenderDistance)
 {
 	// Go through all the chunks in the ChunkMap, remove the extra chunks
 	// TODO: put this back to unload chunks
@@ -497,8 +528,7 @@ void AChunk::PlayerMovedToAnotherChunk(int newChunkX, int newChunkY, TQueue<TArr
 	//}
 	//AChunk::ChunkMap.Compact();
 
-	TFunction<void(int32 i, int32 j, TFunction <BlockType(int32 i, int32 j, int32 k)>)> LoadChunk = [&chunkLoaderQueue](int32 i, int32 j,
-		TFunction <BlockType(int32 i, int32 j, int32 k)> PopulateBlock)
+	auto LoadChunk = [&chunkLoaderQueue](int32 i, int32 j, TPopulateBlockFunc PopulateBlock)
 	{
 		int hash = GetHashFromChunkPosition(i, j);
 		if (ChunkMap.Contains(hash) || chunkResults.Contains(hash)) return;
@@ -534,6 +564,17 @@ void AChunk::PlayerMovedToAnotherChunk(int newChunkX, int newChunkY, TQueue<TArr
 				LoadChunk(i, j, PopulateBlock);
 		}
 	}
+}
+
+void AChunk::ClearAllQueuedChunkTasks()
+{
+	// Clean up all the tasks
+	for (auto chunk : chunkResults)
+	{
+		auto chunkTask = chunk.Value;
+		chunkTask->Reset();
+	}
+	chunkResults.Empty();
 }
 
 //TODO: Is this used??
